@@ -1,37 +1,40 @@
+#![allow(unused)]
+
 use crate::error::MinecraftError;
 use crate::error::Result;
 use bytes::BufMut;
 use bytes::BytesMut;
+use tracing::debug;
+
+const SEGMENT_BITS: u8 = 0x7F;
+const CONTINUE_BIT: u8 = 0x80;
 
 pub struct PacketReader;
 
 impl PacketReader {
-
-    pub fn read_varint(buf: &mut &[u8]) -> Result<i32> {
+    pub fn read_varint(buffer: &mut &[u8]) -> Result<i32> {
         let mut result = 0;
-        let mut length = 0;
+        let mut shift = 0;
 
         loop {
-            if buf.is_empty() {
-                return Err(MinecraftError::VarInt("Incomplete VarInt".into()));
+            let byte = match buffer.first() {
+                Some(&b) => {
+                    *buffer = &buffer[1..];
+                    b
+                }
+                None => return Err(MinecraftError::VarInt("buffer underflow".to_string())),
+            };
+
+            result |= ((byte & SEGMENT_BITS) as i32) << shift;
+            if byte & 0x80 == 0 {
+                debug!("Read VarInt: {} (raw bytes: {:02x})", result, byte);
+                return Ok(result);
             }
-
-            let byte = buf[0];
-            *buf = &buf[1..];
-
-            result |= ((byte & 0x7F) as i32) << (length * 7);
-            length += 1;
-
-            if length > 5 {
-                return Err(MinecraftError::VarInt("VarInt too big".into()));
-            }
-
-            if (byte & 0x80) == 0 {
-                break;
+            shift += 7;
+            if shift >= 32 {
+                return Err(MinecraftError::VarInt("varint too long".to_string()));
             }
         }
-
-        Ok(result)
     }
 
     pub fn read_string(buf: &mut &[u8]) -> Result<String> {
@@ -53,6 +56,39 @@ impl PacketReader {
         *buf = &buf[length as usize..];
 
         Ok(string)
+    }
+
+    pub fn read_byte(buf: &mut &[u8]) -> Result<i8> {
+        if buf.is_empty() {
+            return Err(MinecraftError::BufferUnderrun(
+                "Not enough bytes for byte".into(),
+            ));
+        }
+        let value = buf[0] as i8;
+        *buf = &buf[1..];
+        Ok(value)
+    }
+
+    pub fn read_unsigned_byte(buf: &mut &[u8]) -> Result<u8> {
+        if buf.is_empty() {
+            return Err(MinecraftError::BufferUnderrun(
+                "Not enough bytes for unsigned byte".into(),
+            ));
+        }
+        let value = buf[0];
+        *buf = &buf[1..];
+        Ok(value)
+    }
+
+    pub fn read_boolean(buf: &mut &[u8]) -> Result<bool> {
+        if buf.is_empty() {
+            return Err(MinecraftError::BufferUnderrun(
+                "Not enough bytes for boolean".into(),
+            ));
+        }
+        let value = buf[0];
+        *buf = &buf[1..];
+        Ok(value != 0)
     }
 
     pub fn read_unsigned_short(buf: &mut &[u8]) -> Result<u16> {
@@ -84,6 +120,25 @@ impl PacketReader {
         Ok(result)
     }
 
+    pub fn read_plugin_message(buf: &mut &[u8]) -> Result<(String, Vec<u8>)> {
+        let channel_id = Self::read_string(buf)?;
+
+        //  (byte array)
+        let data = buf.to_vec();
+        *buf = &[]; // clear the buffer
+
+        Ok((channel_id, data))
+    }
+
+    pub fn read_identifier(buf: &mut &[u8]) -> Result<(String, String)> {
+        let full_id = Self::read_string(buf)?;
+        let parts: Vec<&str> = full_id.split(':').collect();
+        if parts.len() != 2 {
+            return Err(MinecraftError::Protocol("Invalid identifier format".into()));
+        }
+        Ok((parts[0].to_string(), parts[1].to_string()))
+    }
+
     pub fn get_varint_size(value: i32) -> usize {
         let mut size = 0;
         let mut val = value as u32;
@@ -101,12 +156,12 @@ impl PacketReader {
     }
     pub fn write_varint(buf: &mut BytesMut, mut value: i32) {
         loop {
-            let mut byte = (value & 0x7F) as u8;
+            let mut byte = value as u8 & SEGMENT_BITS;
 
             value >>= 7;
 
             if value != 0 {
-                byte |= 0x80;
+                byte |= CONTINUE_BIT;
             }
 
             buf.put_u8(byte);
@@ -115,6 +170,11 @@ impl PacketReader {
                 break;
             }
         }
+    }
+
+    pub fn write_identifier(buf: &mut BytesMut, namespace: &str, path: &str) {
+        let identifier = format!("{}:{}", namespace, path);
+        Self::write_string(buf, &identifier);
     }
 
     pub fn write_string(buf: &mut BytesMut, value: &str) {

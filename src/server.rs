@@ -9,7 +9,7 @@ pub struct Server {
 
 impl Server {
     pub async fn new() -> Result<Self> {
-        let listener = TcpListener::bind("0.0.0.0:25565").await?;
+        let listener = TcpListener::bind("127.0.0.1:25565").await?;
         Ok(Self { listener })
     }
 

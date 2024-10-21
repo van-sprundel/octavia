@@ -4,9 +4,10 @@ use tracing::info;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-pub mod connection;
+mod connection;
 mod error;
-pub mod packet;
+mod packet;
+mod registry;
 mod server;
 
 #[tokio::main(flavor = "current_thread")]

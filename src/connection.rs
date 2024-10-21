@@ -1,22 +1,27 @@
 use crate::error::MinecraftError;
 use crate::packet::reader::PacketReader;
+use crate::registry::manager::RegistryManager;
 use crate::Result;
 use bytes::{Buf, BufMut, BytesMut};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument, warn};
+use uuid::Uuid;
 
 const PROTOCOL_VERSION: i32 = 767;
 
 const STATUS_RESPONSE_PACKET_ID: i32 = 0x00;
 const PING_PACKET_ID: i32 = 0x01;
-const LOGIN_PACKET_ID: i32 = 0x02;
+const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
+const JOIN_GAME_PACKET_ID: i32 = 0x24;
+const KEEP_ALIVE_PACKET_ID: i32 = 0x21;
 
 #[derive(Debug, PartialEq)]
 pub enum ConnectionState {
     Handshake,
     Status,
     Login,
+    Configuration,
     Play,
 }
 
@@ -140,27 +145,90 @@ impl Connection {
                     warn!(packet_id, "Unknown packet ID in Status state");
                 }
             },
-            ConnectionState::Login => {
-                info!("User trying to log in");
+            ConnectionState::Login => match packet_id {
+                0x00 => {
+                    let username = PacketReader::read_string(&mut packet_data)?;
+                    self.send_login_success("00000000-0000-0000-0000-000000000001", &username)
+                        .await?;
+                }
+                0x03 => {
+                    debug!("Login acknowledged, switching to Configuration state");
+                    self.state = ConnectionState::Configuration;
+                    self.send_known_packs().await?;
+                }
+                _ => warn!(packet_id, "Unknown packet ID in Login state"),
+            },
+            ConnectionState::Configuration => match packet_id {
+                0x00 => {
+                    // Client Information packet in Configuration
+                    debug!("Received client information in Configuration state");
+                    let locale = PacketReader::read_string(&mut packet_data)?;
+                    let view_distance = PacketReader::read_byte(&mut packet_data)?;
+                    let chat_mode = PacketReader::read_varint(&mut packet_data)?;
+                    let chat_colors = PacketReader::read_boolean(&mut packet_data)?;
+                    let displayed_skin_parts = PacketReader::read_unsigned_byte(&mut packet_data)?;
+                    let main_hand = PacketReader::read_varint(&mut packet_data)?;
+                    let enable_text_filtering = PacketReader::read_boolean(&mut packet_data)?;
+                    let allow_server_listings = PacketReader::read_boolean(&mut packet_data)?;
 
+                    debug!(
+                        locale,
+                        view_distance,
+                        chat_mode,
+                        chat_colors,
+                        displayed_skin_parts,
+                        main_hand,
+                        enable_text_filtering,
+                        allow_server_listings
+                    );
+                }
+                0x02 => {
+                    // Plugin message (minecraft:brand)
+                    // TODO actually do something with the plugin
+                    debug!("Received plugin message in Configuration state");
+                    let (_channel, _data) = PacketReader::read_plugin_message(&mut packet_data)?;
+                }
+                0x03 => {
+                    debug!("Ack configuration finished, switching to Play state");
+
+                    self.state = ConnectionState::Play;
+                    // TODO self.send_play_login().await?;
+                    // TODO self.send_chunk_data().await?;
+                }
+                0x07 => {
+                    let pack_count = PacketReader::read_varint(&mut packet_data)?;
+                    debug!("Received Serverbound Known Packs request in Configuration state. packets={pack_count}");
+
+                    let mut known_packs = Vec::new();
+                    for _ in 0..pack_count {
+                        let namespace = PacketReader::read_string(&mut packet_data)?;
+                        let id = PacketReader::read_string(&mut packet_data)?;
+                        let version = PacketReader::read_string(&mut packet_data)?;
+
+                        debug!(
+                            "Known Pack - Namespace: {}, ID: {}, Version: {}",
+                            namespace, id, version
+                        );
+
+                        known_packs.push((namespace, id, version));
+                    }
+
+                    self.send_registry_data().await?;
+                    self.send_finish_configuration().await?;
+                }
+                _ => warn!(packet_id, "Unknown packet ID in Configuration state"),
+            },
+            ConnectionState::Play => {
+                debug!("Client in Play state, processing packet {}", packet_id);
                 match packet_id {
                     0x00 => {
-                        let username = PacketReader::read_string(&mut packet_data)?;
-                        debug!(%username, "Received login start packet");
-
-                        let player_uuid = "00000000-0000-0000-0000-000000000001".to_string();
-                        self.send_login_success(&player_uuid, &username).await?;
-
-                        self.state = ConnectionState::Play;
-                        info!("Login successful for user: {}", username);
+                        debug!("Received client settings");
                     }
-                    _ => {
-                        warn!("Unknown packet ID during login: {}", packet_id);
+                    0x02 => {
+                        debug!("Received plugin message");
                     }
+                    _ => debug!(packet_id, "Unhandled Play state packet ID"),
                 }
-            }
-            ConnectionState::Play => {
-                debug!("Client in play state, processing packets");
             }
         }
 
@@ -169,7 +237,9 @@ impl Connection {
         Ok(true)
     }
 
-    #[instrument(skip(self))]
+    // packet length     varint
+    // packet id         varint
+    // response          string
     async fn send_status_response(&mut self) -> Result<()> {
         let response = json!({
             "version": {
@@ -208,12 +278,16 @@ impl Connection {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    // packet length  varint
+    // packet id      varint
     async fn send_pong_response(&mut self, payload: i64) -> Result<()> {
         debug!(payload, "Sending pong response");
+
         let mut packet = BytesMut::with_capacity(1024);
-        PacketReader::write_varint(&mut packet, 9);
+
+        PacketReader::write_varint(&mut packet, 9); // payload is always 9 bytes
         PacketReader::write_varint(&mut packet, PING_PACKET_ID);
+
         packet.put_i64(payload);
 
         self.socket.write_all(&packet).await?;
@@ -221,18 +295,115 @@ impl Connection {
         Ok(())
     }
 
-    #[instrument(skip(self))]
-    async fn send_login_success(&mut self, uuid: &str, username: &str) -> Result<()> {
-        debug!("Sending login success for {} ({})", username, uuid);
+    // packet length    varint
+    // UUID             string
+    // username         string
+    // properties       varint
+    // chat validation  boolean
+    async fn send_login_success(&mut self, uuid_str: &str, username: &str) -> Result<()> {
+        let mut content = BytesMut::new();
+
+        PacketReader::write_varint(&mut content, LOGIN_SUCCESS_PACKET_ID);
+
+        let uuid = Uuid::parse_str(uuid_str).unwrap();
+        content.extend_from_slice(uuid.as_bytes());
+
+        PacketReader::write_string(&mut content, username);
+
+        // we have 0 properties
+        PacketReader::write_varint(&mut content, 0);
+
+        content.put_u8(0);
 
         let mut packet = BytesMut::new();
+        PacketReader::write_varint(&mut packet, content.len() as i32);
+        packet.extend_from_slice(&content);
 
-        PacketReader::write_varint(&mut packet, LOGIN_PACKET_ID);
+        debug!("Sending login success packet: {:?}", packet);
+        self.socket.write_all(&packet).await?;
+        Ok(())
+    }
 
-        PacketReader::write_string(&mut packet, uuid);
-        PacketReader::write_string(&mut packet, username);
+    async fn send_keep_alive(&mut self) -> Result<()> {
+        let mut packet = BytesMut::with_capacity(10);
+        PacketReader::write_varint(&mut packet, KEEP_ALIVE_PACKET_ID);
+        packet.put_i64(12345); // arbitrary payload, could be any number
 
         self.socket.write_all(&packet).await?;
         Ok(())
+    }
+
+    /// Sends known packs
+    // packet length   varint
+    // packet id       varint
+    // amt of packs    varint
+    //
+    // foreach pack
+    // ----------------------
+    // namespace       string
+    // title           string
+    // version         string
+    // ----------------------
+    async fn send_known_packs(&mut self) -> Result<()> {
+        let mut content = BytesMut::new();
+
+        PacketReader::write_varint(&mut content, 0x0E);
+
+        PacketReader::write_varint(&mut content, 1);
+
+        PacketReader::write_string(&mut content, "minecraft");
+        PacketReader::write_string(&mut content, "core");
+        PacketReader::write_string(&mut content, "1.21.1");
+
+        let mut packet = BytesMut::new();
+        PacketReader::write_varint(&mut packet, content.len() as i32);
+        packet.extend_from_slice(&content);
+
+        debug!("Sending known packs packet: {:?}", packet);
+        self.socket.write_all(&packet).await?;
+
+        Ok(())
+    }
+
+    /// Sends default registry data
+    async fn send_registry_data(&mut self) -> Result<()> {
+        let manager = RegistryManager::new()?;
+
+        manager.write_registry_data(&mut self.socket).await?;
+
+        debug!("Sent registry data packet");
+        Ok(())
+    }
+
+    // packet length  varint
+    // packet id      varint
+    async fn send_finish_configuration(&mut self) -> Result<()> {
+        let mut packet = BytesMut::new();
+        PacketReader::write_varint(&mut packet, 0x03);
+
+        let mut final_packet = BytesMut::new();
+        PacketReader::write_varint(&mut final_packet, packet.len() as i32);
+        final_packet.extend_from_slice(&packet);
+
+        self.socket.write_all(&final_packet).await?;
+
+        Ok(())
+    }
+
+    /// Helper func to get varint size
+    fn get_varint_size(value: i32) -> usize {
+        let mut size = 0;
+        let mut val = value as u32;
+
+        loop {
+            size += 1;
+            val >>= 7;
+
+            if val == 0 {
+                break;
+            }
+        }
+
+        size
     }
 }
