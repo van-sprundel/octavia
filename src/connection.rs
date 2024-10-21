@@ -8,13 +8,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
-const PROTOCOL_VERSION: i32 = 767;
+pub const PROTOCOL_VERSION: i32 = 767;
 
-const STATUS_RESPONSE_PACKET_ID: i32 = 0x00;
-const PING_PACKET_ID: i32 = 0x01;
-const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
-const JOIN_GAME_PACKET_ID: i32 = 0x24;
-const KEEP_ALIVE_PACKET_ID: i32 = 0x21;
+// Packet IDs
+pub const HANDSHAKE_PACKET_ID: i32 = 0x00;
+
+pub const STATUS_REQUEST_PACKET_ID: i32 = 0x00;
+pub const STATUS_RESPONSE_PACKET_ID: i32 = 0x00;
+pub const PING_REQUEST_PACKET_ID: i32 = 0x01;
+pub const PONG_RESPONSE_PACKET_ID: i32 = 0x01;
+
+pub const LOGIN_START_PACKET_ID: i32 = 0x00;
+pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
+pub const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = 0x03;
+
+pub const CLIENT_INFORMATION_PACKET_ID: i32 = 0x00;
+pub const PLUGIN_MESSAGE_PACKET_ID: i32 = 0x02;
+pub const FINISH_CONFIGURATION_PACKET_ID: i32 = 0x03;
+pub const KNOWN_PACKS_PACKET_ID: i32 = 0x07;
+pub const REGISTRY_DATA_PACKET_ID: i32 = 0x0E;
 
 #[derive(Debug, PartialEq)]
 pub enum ConnectionState {
@@ -104,7 +116,7 @@ impl Connection {
 
         match self.state {
             ConnectionState::Handshake => {
-                if packet_id == 0x00 {
+                if packet_id == HANDSHAKE_PACKET_ID {
                     let protocol_version = PacketReader::read_varint(&mut packet_data)?;
                     let server_address = PacketReader::read_string(&mut packet_data)?;
                     let server_port = PacketReader::read_unsigned_short(&mut packet_data)?;
@@ -131,11 +143,11 @@ impl Connection {
                 }
             }
             ConnectionState::Status => match packet_id {
-                0x00 => {
+                STATUS_REQUEST_PACKET_ID => {
                     debug!("Received status request");
                     self.send_status_response().await?;
                 }
-                0x01 => {
+                PING_REQUEST_PACKET_ID => {
                     let payload = PacketReader::read_long(&mut packet_data)?;
                     debug!(payload, "Received ping request");
                     self.send_pong_response(payload).await?;
@@ -146,12 +158,12 @@ impl Connection {
                 }
             },
             ConnectionState::Login => match packet_id {
-                0x00 => {
+                LOGIN_START_PACKET_ID => {
                     let username = PacketReader::read_string(&mut packet_data)?;
                     self.send_login_success("00000000-0000-0000-0000-000000000001", &username)
                         .await?;
                 }
-                0x03 => {
+                LOGIN_ACKNOWLEDGED_PACKET_ID => {
                     debug!("Login acknowledged, switching to Configuration state");
                     self.state = ConnectionState::Configuration;
                     self.send_known_packs().await?;
@@ -159,7 +171,7 @@ impl Connection {
                 _ => warn!(packet_id, "Unknown packet ID in Login state"),
             },
             ConnectionState::Configuration => match packet_id {
-                0x00 => {
+                CLIENT_INFORMATION_PACKET_ID => {
                     // Client Information packet in Configuration
                     debug!("Received client information in Configuration state");
                     let locale = PacketReader::read_string(&mut packet_data)?;
@@ -182,20 +194,20 @@ impl Connection {
                         allow_server_listings
                     );
                 }
-                0x02 => {
+                PLUGIN_MESSAGE_PACKET_ID => {
                     // Plugin message (minecraft:brand)
                     // TODO actually do something with the plugin
                     debug!("Received plugin message in Configuration state");
                     let (_channel, _data) = PacketReader::read_plugin_message(&mut packet_data)?;
                 }
-                0x03 => {
+                FINISH_CONFIGURATION_PACKET_ID => {
                     debug!("Ack configuration finished, switching to Play state");
 
                     self.state = ConnectionState::Play;
                     // TODO self.send_play_login().await?;
                     // TODO self.send_chunk_data().await?;
                 }
-                0x07 => {
+                KNOWN_PACKS_PACKET_ID => {
                     let pack_count = PacketReader::read_varint(&mut packet_data)?;
                     debug!("Received Serverbound Known Packs request in Configuration state. packets={pack_count}");
 
@@ -221,12 +233,6 @@ impl Connection {
             ConnectionState::Play => {
                 debug!("Client in Play state, processing packet {}", packet_id);
                 match packet_id {
-                    0x00 => {
-                        debug!("Received client settings");
-                    }
-                    0x02 => {
-                        debug!("Received plugin message");
-                    }
                     _ => debug!(packet_id, "Unhandled Play state packet ID"),
                 }
             }
@@ -286,7 +292,7 @@ impl Connection {
         let mut packet = BytesMut::with_capacity(1024);
 
         PacketReader::write_varint(&mut packet, 9); // payload is always 9 bytes
-        PacketReader::write_varint(&mut packet, PING_PACKET_ID);
+        PacketReader::write_varint(&mut packet, PING_REQUEST_PACKET_ID);
 
         packet.put_i64(payload);
 
@@ -326,7 +332,7 @@ impl Connection {
 
     async fn send_keep_alive(&mut self) -> Result<()> {
         let mut packet = BytesMut::with_capacity(10);
-        PacketReader::write_varint(&mut packet, KEEP_ALIVE_PACKET_ID);
+        PacketReader::write_varint(&mut packet, 0x21);
         packet.put_i64(12345); // arbitrary payload, could be any number
 
         self.socket.write_all(&packet).await?;

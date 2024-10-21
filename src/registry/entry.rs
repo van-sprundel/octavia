@@ -1,4 +1,4 @@
-use crate::packet::reader::PacketReader;
+use crate::{ packet::reader::PacketReader};
 use bytes::{BufMut, BytesMut};
 use tracing::debug;
 

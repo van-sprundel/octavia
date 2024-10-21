@@ -26,7 +26,7 @@ impl PacketReader {
             };
 
             result |= ((byte & SEGMENT_BITS) as i32) << shift;
-            if byte & 0x80 == 0 {
+            if byte & CONTINUE_BIT == 0 {
                 debug!("Read VarInt: {} (raw bytes: {:02x})", result, byte);
                 return Ok(result);
             }
