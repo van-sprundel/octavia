@@ -139,6 +139,7 @@ impl PacketReader {
         Ok((parts[0].to_string(), parts[1].to_string()))
     }
 
+    /// Helper function to get size of varint
     pub fn get_varint_size(value: i32) -> usize {
         let mut size = 0;
         let mut val = value as u32;

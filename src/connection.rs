@@ -16,7 +16,6 @@ pub const HANDSHAKE_PACKET_ID: i32 = 0x00;
 pub const STATUS_REQUEST_PACKET_ID: i32 = 0x00;
 pub const STATUS_RESPONSE_PACKET_ID: i32 = 0x00;
 pub const PING_REQUEST_PACKET_ID: i32 = 0x01;
-pub const PONG_RESPONSE_PACKET_ID: i32 = 0x01;
 
 pub const LOGIN_START_PACKET_ID: i32 = 0x00;
 pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
@@ -26,7 +25,6 @@ pub const CLIENT_INFORMATION_PACKET_ID: i32 = 0x00;
 pub const PLUGIN_MESSAGE_PACKET_ID: i32 = 0x02;
 pub const FINISH_CONFIGURATION_PACKET_ID: i32 = 0x03;
 pub const KNOWN_PACKS_PACKET_ID: i32 = 0x07;
-pub const REGISTRY_DATA_PACKET_ID: i32 = 0x0E;
 
 #[derive(Debug, PartialEq)]
 pub enum ConnectionState {
@@ -328,6 +326,7 @@ impl Connection {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn send_keep_alive(&mut self) -> Result<()> {
         let mut packet = BytesMut::with_capacity(10);
         PacketReader::write_varint(&mut packet, 0x21);
@@ -395,22 +394,5 @@ impl Connection {
         self.socket.write_all(&final_packet).await?;
 
         Ok(())
-    }
-
-    /// Helper func to get varint size
-    fn get_varint_size(value: i32) -> usize {
-        let mut size = 0;
-        let mut val = value as u32;
-
-        loop {
-            size += 1;
-            val >>= 7;
-
-            if val == 0 {
-                break;
-            }
-        }
-
-        size
     }
 }
