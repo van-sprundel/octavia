@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-mod entry;
+pub mod entry;
 pub mod manager;
 
 use serde::{Deserialize, Serialize};

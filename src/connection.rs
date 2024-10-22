@@ -232,9 +232,7 @@ impl Connection {
             },
             ConnectionState::Play => {
                 debug!("Client in Play state, processing packet {}", packet_id);
-                match packet_id {
-                    _ => debug!(packet_id, "Unhandled Play state packet ID"),
-                }
+                debug!(packet_id, "Unhandled Play state packet ID")
             }
         }
 
@@ -376,8 +374,11 @@ impl Connection {
         let manager = RegistryManager::new()?;
 
         manager.write_registry_data(&mut self.socket).await?;
-
         debug!("Sent registry data packet");
+
+        manager.write_update_tags(&mut self.socket).await?;
+        debug!("Sent update tags packet");
+
         Ok(())
     }
 

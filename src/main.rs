@@ -9,6 +9,7 @@ mod error;
 mod packet;
 mod registry;
 mod server;
+mod tag;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {

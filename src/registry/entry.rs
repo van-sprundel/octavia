@@ -1,11 +1,12 @@
-use crate::{ packet::reader::PacketReader};
+use crate::packet::reader::PacketReader;
 use bytes::{BufMut, BytesMut};
+use serde::Deserialize;
 use tracing::debug;
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct RegistryEntry {
-    namespace: String,
-    name: String,
+    pub namespace: String,
+    pub name: String,
 }
 
 impl RegistryEntry {
